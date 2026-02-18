@@ -60,6 +60,7 @@ import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
 import { loadSettings, type UiSettings } from "./storage.ts";
 import type { ResolvedTheme, ThemeMode } from "./theme.ts";
+import "./custom/register.ts";
 import type {
   AgentsListResult,
   AgentsFilesListResult,

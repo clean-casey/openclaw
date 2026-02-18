@@ -1,5 +1,13 @@
 import { t } from "../i18n/index.ts";
 import type { IconName } from "./icons.js";
+import {
+  customSlugFromTabId,
+  customTabIdFromSlug,
+  getCustomTab,
+  isCustomTabId,
+  listCustomTabs,
+  type CustomTabId,
+} from "./custom/registry.ts";
 
 export const TAB_GROUPS = [
   { label: "chat", tabs: ["chat"] },
@@ -11,7 +19,7 @@ export const TAB_GROUPS = [
   { label: "settings", tabs: ["config", "debug", "logs"] },
 ] as const;
 
-export type Tab =
+export type StockTab =
   | "agents"
   | "overview"
   | "channels"
@@ -26,7 +34,9 @@ export type Tab =
   | "debug"
   | "logs";
 
-const TAB_PATHS: Record<Tab, string> = {
+export type Tab = StockTab | CustomTabId;
+
+const TAB_PATHS: Record<StockTab, string> = {
   agents: "/agents",
   overview: "/overview",
   channels: "/channels",
@@ -42,7 +52,19 @@ const TAB_PATHS: Record<Tab, string> = {
   logs: "/logs",
 };
 
-const PATH_TO_TAB = new Map(Object.entries(TAB_PATHS).map(([tab, path]) => [path, tab as Tab]));
+const PATH_TO_TAB = new Map(
+  Object.entries(TAB_PATHS).map(([tab, path]) => [path, tab as StockTab]),
+);
+
+export function tabGroupsForNav(): Array<{ label: string; tabs: Tab[] }> {
+  const customTabs = listCustomTabs().map((tab) => tab.id);
+  return TAB_GROUPS.map((group) => {
+    if (group.label !== "control" || customTabs.length === 0) {
+      return { label: group.label, tabs: [...group.tabs] as Tab[] };
+    }
+    return { label: group.label, tabs: [...group.tabs, ...customTabs] as Tab[] };
+  });
+}
 
 export function normalizeBasePath(basePath: string): string {
   if (!basePath) {
@@ -77,7 +99,9 @@ export function normalizePath(path: string): string {
 
 export function pathForTab(tab: Tab, basePath = ""): string {
   const base = normalizeBasePath(basePath);
-  const path = TAB_PATHS[tab];
+  const path = isCustomTabId(tab)
+    ? `/custom/${encodeURIComponent(customSlugFromTabId(tab))}`
+    : TAB_PATHS[tab];
   return base ? `${base}${path}` : path;
 }
 
@@ -98,7 +122,17 @@ export function tabFromPath(pathname: string, basePath = ""): Tab | null {
   if (normalized === "/") {
     return "chat";
   }
-  return PATH_TO_TAB.get(normalized) ?? null;
+  const stockTab = PATH_TO_TAB.get(normalized) ?? null;
+  if (stockTab) {
+    return stockTab;
+  }
+  if (normalized.startsWith("/custom/")) {
+    const slug = normalized.slice("/custom/".length);
+    if (slug) {
+      return customTabIdFromSlug(decodeURIComponent(slug));
+    }
+  }
+  return null;
 }
 
 export function inferBasePathFromPathname(pathname: string): string {
@@ -124,6 +158,10 @@ export function inferBasePathFromPathname(pathname: string): string {
 }
 
 export function iconForTab(tab: Tab): IconName {
+  if (isCustomTabId(tab)) {
+    const spec = getCustomTab(tab);
+    return spec?.icon ?? "folder";
+  }
   switch (tab) {
     case "agents":
       return "folder";
@@ -157,9 +195,15 @@ export function iconForTab(tab: Tab): IconName {
 }
 
 export function titleForTab(tab: Tab) {
+  if (isCustomTabId(tab)) {
+    return getCustomTab(tab)?.title ?? "Custom";
+  }
   return t(`tabs.${tab}`);
 }
 
 export function subtitleForTab(tab: Tab) {
+  if (isCustomTabId(tab)) {
+    return getCustomTab(tab)?.subtitle ?? "";
+  }
   return t(`subtitles.${tab}`);
 }
