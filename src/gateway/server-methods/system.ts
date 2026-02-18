@@ -1,3 +1,5 @@
+import os from "node:os";
+import { statfs } from "node:fs/promises";
 import { resolveMainSessionKeyFromConfig } from "../../config/sessions.js";
 import { getLastHeartbeatEvent } from "../../infra/heartbeat-events.js";
 import { setHeartbeatsEnabled } from "../../infra/heartbeat-runner.js";
@@ -7,9 +9,102 @@ import { ErrorCodes, errorShape } from "../protocol/index.js";
 import { broadcastPresenceSnapshot } from "../server/presence-events.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
+type StatFs = Awaited<ReturnType<typeof statfs>>;
+
+function toNumberMaybe(value: number | bigint): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  // Guard against huge disks > MAX_SAFE_INTEGER.
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null;
+  }
+  return n;
+}
+
+async function getDiskSnapshot(pathname: string): Promise<{
+  path: string;
+  totalBytes: number | null;
+  freeBytes: number | null;
+  usedBytes: number | null;
+  totalBytesStr: string;
+  freeBytesStr: string;
+  usedBytesStr: string;
+} | null> {
+  try {
+    const s = (await statfs(pathname)) as StatFs & {
+      bsize?: number | bigint;
+      blocks?: number | bigint;
+      bavail?: number | bigint;
+    };
+    const bsize = s.bsize ?? 0;
+    const blocks = s.blocks ?? 0;
+    const bavail = s.bavail ?? 0;
+
+    const bsizeBig = typeof bsize === "bigint" ? bsize : BigInt(Math.max(0, bsize));
+    const blocksBig = typeof blocks === "bigint" ? blocks : BigInt(Math.max(0, blocks));
+    const bavailBig = typeof bavail === "bigint" ? bavail : BigInt(Math.max(0, bavail));
+
+    const totalBig = bsizeBig * blocksBig;
+    const freeBig = bsizeBig * bavailBig;
+    const usedBig = totalBig >= freeBig ? totalBig - freeBig : BigInt(0);
+
+    const totalBytes = toNumberMaybe(totalBig);
+    const freeBytes = toNumberMaybe(freeBig);
+    const usedBytes = toNumberMaybe(usedBig);
+
+    return {
+      path: pathname,
+      totalBytes,
+      freeBytes,
+      usedBytes,
+      totalBytesStr: totalBig.toString(),
+      freeBytesStr: freeBig.toString(),
+      usedBytesStr: usedBig.toString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const systemHandlers: GatewayRequestHandlers = {
   "last-heartbeat": ({ respond }) => {
     respond(true, getLastHeartbeatEvent(), undefined);
+  },
+  "system.metrics": async ({ respond }) => {
+    const total = os.totalmem();
+    const free = os.freemem();
+    const used = Math.max(0, total - free);
+    const load = os.loadavg();
+    const cpuCount = os.cpus()?.length ?? null;
+    const diskRoot = await getDiskSnapshot("/");
+    respond(
+      true,
+      {
+        ts: Date.now(),
+        hostname: os.hostname(),
+        platform: os.platform(),
+        arch: os.arch(),
+        uptimeMs: Math.round(process.uptime() * 1000),
+        cpu: {
+          cores: cpuCount,
+          loadavg1: load?.[0] ?? null,
+          loadavg5: load?.[1] ?? null,
+          loadavg15: load?.[2] ?? null,
+        },
+        mem: { totalBytes: total, freeBytes: free, usedBytes: used },
+        disk: diskRoot,
+        process: {
+          pid: process.pid,
+          rssBytes: process.memoryUsage().rss,
+        },
+      },
+      undefined,
+    );
   },
   "set-heartbeats": ({ params, respond }) => {
     const enabled = params.enabled;

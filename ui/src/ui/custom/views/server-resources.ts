@@ -7,16 +7,23 @@ import { registerCustomTab } from "../registry.ts";
 import { renderStatusCard } from "../components/status-card.ts";
 
 type NodeListResponse = {
-  ts?: number;
-  nodes?: Array<{
-    nodeId: string;
-    displayName?: string;
-    platform?: string;
-    deviceFamily?: string;
-    connected?: boolean;
-    commands?: string[];
-    caps?: string[];
-  }>;
+  nodes?: Array<{ nodeId: string; displayName?: string; connected?: boolean; platform?: string }>;
+};
+
+type ExecApprovalAccepted = { status?: string; id?: string; createdAtMs?: number; expiresAtMs?: number };
+
+type ExecApprovalWait = { id?: string; decision?: string | null };
+
+type NodeInvokeResponse = { payload?: unknown } | null;
+
+type SystemRunResult = {
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  success?: boolean;
+  timedOut?: boolean;
+  error?: string | null;
+  truncated?: boolean;
 };
 
 @customElement("openclaw-server-resources")
@@ -40,7 +47,6 @@ class OpenClawServerResources extends LitElement {
   @state() private loadAvg: { one: number; five: number; fifteen: number } | null = null;
   @state() private mem: { total: number; used: number; free: number } | null = null;
   @state() private diskRoot: { total: number; used: number; free: number } | null = null;
-  @state() private gpu: { summary: string; raw?: unknown } | null = null;
 
   protected updated(changed: Map<string, unknown>) {
     const shouldAutoRefresh =
@@ -72,56 +78,8 @@ class OpenClawServerResources extends LitElement {
     return Math.max(0, Math.min(100, (used / total) * 100));
   }
 
-  private async invokeNode<T = unknown>(params: {
-    nodeId: string;
-    command: string;
-    params?: unknown;
-    timeoutMs?: number;
-  }): Promise<T> {
-    if (!this.client) {
-      throw new Error("no client");
-    }
-    const idempotencyKey =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : String(Date.now());
-    const res = await this.client.request("node.invoke", {
-      nodeId: params.nodeId,
-      command: params.command,
-      params: params.params ?? {},
-      timeoutMs: params.timeoutMs ?? 8000,
-      idempotencyKey,
-    });
-    // node.invoke wraps the node response
-    const payload = (res as { payload?: unknown } | null)?.payload;
-    return payload as T;
-  }
-
-  private async selectDefaultNode(): Promise<{
-    nodeId: string;
-    label: string;
-    platform: string | null;
-  }> {
-    if (!this.client) {
-      throw new Error("no client");
-    }
-    const list = (await this.client.request("node.list", {})) as NodeListResponse;
-    const nodes = Array.isArray(list?.nodes) ? list.nodes : [];
-    const connected = nodes.filter((n) => Boolean(n.connected));
-    const pick = connected[0] ?? nodes[0];
-    const nodeId = pick?.nodeId?.trim();
-    if (!nodeId) {
-      throw new Error("no nodes available (node.list empty)");
-    }
-    const label = pick.displayName?.trim() || nodeId;
-    const platform = pick.platform?.trim() || null;
-    return { nodeId, label, platform };
-  }
-
   private parseLoadAvg(raw: string): { one: number; five: number; fifteen: number } | null {
     const text = raw.trim();
-    // macOS: "load averages: 2.06 2.22 2.34"
-    // Linux:  "load average: 0.20, 0.30, 0.40"
     const m =
       text.match(/load averages?:\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)/i) ??
       text.match(/^\s*([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+/);
@@ -138,8 +96,6 @@ class OpenClawServerResources extends LitElement {
   }
 
   private parseDfKb(raw: string): { total: number; used: number; free: number } | null {
-    // df -kP /
-    // Filesystem 1024-blocks Used Available Capacity Mounted on
     const lines = raw.trim().split("\n").filter(Boolean);
     if (lines.length < 2) {
       return null;
@@ -158,7 +114,6 @@ class OpenClawServerResources extends LitElement {
   }
 
   private parseFreeBytes(raw: string): { total: number; used: number; free: number } | null {
-    // free -b
     const line = raw
       .split("\n")
       .map((l) => l.trim())
@@ -167,7 +122,6 @@ class OpenClawServerResources extends LitElement {
       return null;
     }
     const cols = line.split(/\s+/);
-    // Mem: total used free shared buff/cache available
     if (cols.length < 4) {
       return null;
     }
@@ -180,8 +134,10 @@ class OpenClawServerResources extends LitElement {
     return { total, used, free };
   }
 
-  private parseVmStat(raw: string, totalBytes: number | null): { total: number; used: number; free: number } | null {
-    // vm_stat
+  private parseVmStat(
+    raw: string,
+    totalBytes: number | null,
+  ): { total: number; used: number; free: number } | null {
     const pageSizeMatch = raw.match(/page size of\s+(\d+)\s+bytes/i);
     const pageSize = pageSizeMatch ? Number(pageSizeMatch[1]) : 4096;
     const pages: Record<string, number> = {};
@@ -197,9 +153,7 @@ class OpenClawServerResources extends LitElement {
     const wired = pages["pages wired down"] ?? 0;
     const speculative = pages["pages speculative"] ?? 0;
     const compressed = pages["pages occupied by compressor"] ?? 0;
-
     const free = freePages * pageSize;
-    // Approx "used" as everything not free; speculative is often reclaimable but still resident.
     const usedApprox = (active + inactive + wired + speculative + compressed) * pageSize;
     const total = totalBytes ?? (free + usedApprox);
     if (!Number.isFinite(total) || total <= 0) {
@@ -207,6 +161,101 @@ class OpenClawServerResources extends LitElement {
     }
     const used = Math.min(total, usedApprox);
     return { total, used, free: Math.max(0, total - used) };
+  }
+
+  private async selectDefaultNode(): Promise<{ nodeId: string; label: string; platform: string | null }> {
+    if (!this.client) {
+      throw new Error("no client");
+    }
+    const list = (await this.client.request("node.list", {})) as NodeListResponse;
+    const nodes = Array.isArray(list?.nodes) ? list.nodes : [];
+    const connected = nodes.filter((n) => Boolean(n.connected));
+    const pick = connected[0] ?? nodes[0];
+    const nodeId = pick?.nodeId?.trim();
+    if (!nodeId) {
+      throw new Error("no nodes available (node.list empty)");
+    }
+    return {
+      nodeId,
+      label: pick?.displayName?.trim() || nodeId,
+      platform: pick?.platform?.trim() || null,
+    };
+  }
+
+  private async invokeNode<T = unknown>(params: {
+    nodeId: string;
+    command: string;
+    params?: Record<string, unknown>;
+  }): Promise<T> {
+    if (!this.client) {
+      throw new Error("no client");
+    }
+    const idempotencyKey =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : String(Date.now());
+    const res = (await this.client.request("node.invoke", {
+      nodeId: params.nodeId,
+      command: params.command,
+      params: params.params ?? {},
+      timeoutMs: 15000,
+      idempotencyKey,
+    })) as NodeInvokeResponse;
+    return (res as { payload?: unknown } | null)?.payload as T;
+  }
+
+  private async requestApproval(cmdText: string): Promise<{ id: string; decision: string | null }> {
+    if (!this.client) {
+      throw new Error("no client");
+    }
+    const accepted = (await this.client.request("exec.approval.request", {
+      twoPhase: true,
+      host: "node",
+      command: cmdText,
+      ask: "Machine Health tab needs permission to run a system command.",
+      timeoutMs: 120000,
+    })) as ExecApprovalAccepted;
+    const id = String(accepted?.id ?? "").trim();
+    if (!id) {
+      throw new Error("exec approval request failed: missing id");
+    }
+    const final = (await this.client.request("exec.approval.waitDecision", { id })) as ExecApprovalWait;
+    const decision = typeof final?.decision === "string" ? final.decision : null;
+    return { id, decision };
+  }
+
+  private async runSystemRunWithApproval(nodeId: string, argv: string[]): Promise<string> {
+    const cmdText = argv.join(" ");
+    try {
+      const out = await this.invokeNode<SystemRunResult>({
+        nodeId,
+        command: "system.run",
+        params: { command: argv },
+      });
+      return String(out?.stdout ?? "");
+    } catch (err) {
+      const msg = String(err);
+      const needsApproval =
+        msg.includes("SYSTEM_RUN_DENIED: approval required") || msg.includes("SYSTEM_RUN_DENIED: allowlist miss");
+      if (!needsApproval) {
+        throw err;
+      }
+      const approval = await this.requestApproval(cmdText);
+      if (approval.decision !== "allow-once" && approval.decision !== "allow-always") {
+        throw new Error("Denied or timed out");
+      }
+      const out = await this.invokeNode<SystemRunResult>({
+        nodeId,
+        command: "system.run",
+        params: {
+          command: argv,
+          runId: approval.id,
+          approved: true,
+          approvalDecision: approval.decision,
+        },
+      });
+      return String(out?.stdout ?? "");
+    }
   }
 
   private async refresh() {
@@ -224,87 +273,24 @@ class OpenClawServerResources extends LitElement {
       this.nodeLabel = picked.label;
       this.platform = picked.platform;
 
-      const which = await this.invokeNode<{ bins?: Record<string, string> }>({
-        nodeId: picked.nodeId,
-        command: "system.which",
-        params: { bins: ["uptime", "sysctl", "vm_stat", "free", "df", "nvidia-smi"] },
-      });
-      const bins = which?.bins && typeof which.bins === "object" ? which.bins : {};
+      const uptimeOut = await this.runSystemRunWithApproval(picked.nodeId, ["uptime"]);
+      this.loadAvg = this.parseLoadAvg(uptimeOut) ?? null;
 
-      // CPU load
-      if (bins["sysctl"]) {
-        const raw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["sysctl", "-n", "vm.loadavg"] },
-        });
-        this.loadAvg = this.parseLoadAvg(String(raw ?? "")) ?? null;
-      } else if (bins["uptime"]) {
-        const raw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["uptime"] },
-        });
-        this.loadAvg = this.parseLoadAvg(String(raw ?? "")) ?? null;
-      } else {
-        this.loadAvg = null;
-      }
-
-      // Memory
-      if (bins["sysctl"] && bins["vm_stat"]) {
-        const totalRaw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["sysctl", "-n", "hw.memsize"] },
-        });
+      const isDarwin =
+        (picked.platform ?? "").toLowerCase().includes("darwin") ||
+        (picked.platform ?? "").toLowerCase().includes("mac");
+      if (isDarwin) {
+        const totalRaw = await this.runSystemRunWithApproval(picked.nodeId, ["sysctl", "-n", "hw.memsize"]);
         const total = Number(String(totalRaw ?? "").trim());
-        const vmRaw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["vm_stat"] },
-        });
+        const vmRaw = await this.runSystemRunWithApproval(picked.nodeId, ["vm_stat"]);
         this.mem = this.parseVmStat(String(vmRaw ?? ""), Number.isFinite(total) ? total : null);
-      } else if (bins["free"]) {
-        const raw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["free", "-b"] },
-        });
-        this.mem = this.parseFreeBytes(String(raw ?? ""));
       } else {
-        this.mem = null;
+        const freeRaw = await this.runSystemRunWithApproval(picked.nodeId, ["free", "-b"]);
+        this.mem = this.parseFreeBytes(String(freeRaw ?? ""));
       }
 
-      // Disk (root filesystem)
-      if (bins["df"]) {
-        const raw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: { command: ["df", "-kP", "/"] },
-        });
-        this.diskRoot = this.parseDfKb(String(raw ?? ""));
-      } else {
-        this.diskRoot = null;
-      }
-
-      // GPU (optional)
-      if (bins["nvidia-smi"]) {
-        const raw = await this.invokeNode<string>({
-          nodeId: picked.nodeId,
-          command: "system.run",
-          params: {
-            command: [
-              "nvidia-smi",
-              "--query-gpu=name,utilization.gpu,memory.total,memory.used",
-              "--format=csv,noheader,nounits",
-            ],
-          },
-        });
-        const line = String(raw ?? "").trim().split("\n")[0]?.trim() ?? "";
-        this.gpu = line ? { summary: line } : { summary: "nvidia-smi present but no data" };
-      } else {
-        this.gpu = { summary: "n/a (no GPU metrics command detected)" };
-      }
+      const dfRaw = await this.runSystemRunWithApproval(picked.nodeId, ["df", "-kP", "/"]);
+      this.diskRoot = this.parseDfKb(String(dfRaw ?? ""));
     } catch (err) {
       this.error = String(err);
     } finally {
@@ -318,11 +304,11 @@ class OpenClawServerResources extends LitElement {
 
     const healthTone = this.connected ? ("success" as const) : ("danger" as const);
 
-    const memPct = this.mem ? this.pct(this.mem.used, this.mem.total) : null;
-    const diskPct = this.diskRoot ? this.pct(this.diskRoot.used, this.diskRoot.total) : null;
     const load = this.loadAvg
       ? `${this.loadAvg.one.toFixed(2)} / ${this.loadAvg.five.toFixed(2)} / ${this.loadAvg.fifteen.toFixed(2)}`
       : "n/a";
+    const memPct = this.mem ? this.pct(this.mem.used, this.mem.total) : null;
+    const diskPct = this.diskRoot ? this.pct(this.diskRoot.used, this.diskRoot.total) : null;
 
     return html`
       <section class="grid grid-cols-2">
@@ -346,7 +332,7 @@ class OpenClawServerResources extends LitElement {
 
         ${renderStatusCard({
           title: "Machine",
-          subtitle: "Collected via node.invoke + system.run",
+          subtitle: "Collected via node.invoke(system.run) (may require approval once)",
           tone: "neutral",
           body: html`
             <div class="stack">
@@ -359,6 +345,7 @@ class OpenClawServerResources extends LitElement {
                 <span class="mono">${this.platform ?? "n/a"}</span>
               </div>
               <div><span class="muted">CPU load (1/5/15):</span> <span class="mono">${load}</span></div>
+              <div class="muted">Tip: choose "Always allow" in the approval prompt to stop seeing prompts.</div>
             </div>
           `,
         })}
@@ -387,7 +374,7 @@ class OpenClawServerResources extends LitElement {
         </div>
         <div class="card">
           <div class="card-title">Disk</div>
-          <div class="card-sub">Root filesystem (df -kP /)</div>
+          <div class="card-sub">Root filesystem (df)</div>
           ${
             this.diskRoot
               ? html`
@@ -409,8 +396,8 @@ class OpenClawServerResources extends LitElement {
 
       <section class="card" style="margin-top: 18px;">
         <div class="card-title">GPU</div>
-        <div class="card-sub">Best-effort (nvidia-smi if available)</div>
-        <div class="mono" style="margin-top: 12px;">${this.gpu?.summary ?? "n/a"}</div>
+        <div class="card-sub">Not implemented yet (would require additional tooling)</div>
+        <div class="mono" style="margin-top: 12px;">n/a</div>
       </section>
     `;
   }

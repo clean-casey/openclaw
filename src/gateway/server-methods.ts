@@ -72,6 +72,7 @@ const READ_METHODS = new Set([
   "cron.status",
   "cron.runs",
   "system-presence",
+  "system.metrics",
   "last-heartbeat",
   "node.list",
   "node.describe",
