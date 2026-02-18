@@ -21,6 +21,11 @@ class OpenClawServerResources extends LitElement {
   @property({ type: Boolean }) connected = false;
   @property({ attribute: false }) hello: GatewayHelloOk | null = null;
 
+  // Render into light DOM so existing control-ui CSS applies.
+  createRenderRoot() {
+    return this;
+  }
+
   @state() private loading = false;
   @state() private error: string | null = null;
 
