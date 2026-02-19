@@ -83,6 +83,16 @@ Best practice for custom pages:
 
 See: `ui/src/ui/custom/views/server-resources.ts`.
 
+## Documents Page (RAG)
+
+This repo also includes a custom "Documents" page (`custom:documents`) for managing a tenant-scoped RAG index.
+
+It expects the gateway to expose `rag.*` JSON-RPC methods. Those are provided via the plugin at:
+
+- `extensions/rag-docs/` (plugin id: `rag-docs`)
+
+Token/tenant segregation is enforced by the RAG API token configured in each agent/workspace's `config/mcporter.json` (the gateway reads that file server-side; the browser never sees the bearer token).
+
 ## Local Development
 
 From repo root:

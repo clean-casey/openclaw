@@ -13,6 +13,7 @@ import { healthHandlers } from "./server-methods/health.js";
 import { logsHandlers } from "./server-methods/logs.js";
 import { modelsHandlers } from "./server-methods/models.js";
 import { nodeHandlers } from "./server-methods/nodes.js";
+import { ragHandlers } from "./server-methods/rag.js";
 import { sendHandlers } from "./server-methods/send.js";
 import { sessionsHandlers } from "./server-methods/sessions.js";
 import { skillsHandlers } from "./server-methods/skills.js";
@@ -79,6 +80,9 @@ const READ_METHODS = new Set([
   "chat.history",
   "config.get",
   "talk.config",
+  "rag.tenants",
+  "rag.documents.list",
+  "rag.search",
 ]);
 const WRITE_METHODS = new Set([
   "send",
@@ -95,6 +99,8 @@ const WRITE_METHODS = new Set([
   "chat.send",
   "chat.abort",
   "browser.request",
+  "rag.ingest",
+  "rag.documents.delete",
 ]);
 
 function authorizeGatewayMethod(method: string, client: GatewayRequestOptions["client"]) {
@@ -190,6 +196,7 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
   ...systemHandlers,
   ...updateHandlers,
   ...nodeHandlers,
+  ...ragHandlers,
   ...sendHandlers,
   ...usageHandlers,
   ...agentHandlers,

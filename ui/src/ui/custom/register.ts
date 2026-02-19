@@ -3,4 +3,5 @@
 
 import "./theme-overrides.ts";
 import "./views/server-resources.ts";
+import "./views/documents.ts";
 
