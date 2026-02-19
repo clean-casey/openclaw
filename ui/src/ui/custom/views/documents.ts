@@ -24,6 +24,8 @@ type RagSearchHit = {
   doc_id: string;
   filename: string;
   file_type: string;
+  source_url?: string | null;
+  title?: string | null;
   page_number?: number | null;
   chunk_index: number;
 };
@@ -68,6 +70,7 @@ class OpenClawRagDocuments extends LitElement {
   @state() private searchHits: RagSearchHit[] = [];
 
   @state() private dragOver = false;
+  @state() private urlInput = "";
 
   protected updated(changed: Map<string, unknown>) {
     const shouldInit = (changed.has("connected") || changed.has("client")) && this.connected && this.client;
@@ -209,6 +212,25 @@ class OpenClawRagDocuments extends LitElement {
     }
   }
 
+  private async ingestUrl(url: string) {
+    if (!this.client || !this.connected || !this.tenantId) return;
+    const u = (url || "").trim();
+    if (!u) return;
+    this.loading = true;
+    this.error = null;
+    this.okMsg = null;
+    try {
+      await this.client.request("rag.ingest_url", { tenantId: this.tenantId, url: u });
+      this.okMsg = "Fetched and indexed URL.";
+      this.urlInput = "";
+      await this.refreshDocuments();
+    } catch (err) {
+      this.error = String(err);
+    } finally {
+      this.loading = false;
+    }
+  }
+
   private handleDragOver(e: DragEvent) {
     e.preventDefault();
     e.stopPropagation();
@@ -280,7 +302,7 @@ class OpenClawRagDocuments extends LitElement {
     return html`
       <section class="card" style="margin-top: 18px;">
         <div class="card-title">Upload</div>
-        <div class="card-sub">Drag files here or use the file picker. Limit ~25 MB per file.</div>
+        <div class="card-sub">Drag files here, paste a URL, or use the file picker. Limit ~25 MB per file.</div>
         <div
           style=${dropStyle}
           @dragover=${(e: DragEvent) => this.handleDragOver(e)}
@@ -288,6 +310,26 @@ class OpenClawRagDocuments extends LitElement {
           @drop=${(e: DragEvent) => this.handleDrop(e)}
         >
           <div class="muted">${this.dragOver ? "Drop to upload" : "Drag & drop files here"}</div>
+          <div class="row" style="gap: 12px; margin-top: 12px; align-items: center;">
+            <input
+              class="input"
+              style="flex: 1;"
+              placeholder="https://example.com/page"
+              .value=${this.urlInput}
+              ?disabled=${!this.connected || this.loading || !this.tenantId}
+              @input=${(e: Event) => (this.urlInput = (e.target as HTMLInputElement).value)}
+              @keydown=${(e: KeyboardEvent) => {
+                if (e.key === "Enter") void this.ingestUrl(this.urlInput);
+              }}
+            />
+            <button
+              class="btn"
+              ?disabled=${!this.connected || this.loading || !this.tenantId || !this.urlInput.trim()}
+              @click=${() => this.ingestUrl(this.urlInput)}
+            >
+              Fetch URL
+            </button>
+          </div>
           <div style="margin-top: 10px;">
             <input
               class="input"
@@ -393,6 +435,11 @@ class OpenClawRagDocuments extends LitElement {
                         <div class="mono">${h.filename}</div>
                         <div class="mono">${h.tenant_id} · ${(h.score ?? 0).toFixed(3)}</div>
                       </div>
+                      ${h.source_url
+                        ? html`<div class="muted" style="margin-top: 6px;">
+                            Source: <span class="mono">${h.source_url}</span>
+                          </div>`
+                        : nothing}
                       <div class="muted" style="margin-top: 6px;">${h.text}</div>
                     </div>
                   `,

@@ -139,6 +139,26 @@ export default async function register(api: OpenClawPluginApi) {
     }
   });
 
+  api.registerGatewayMethod("rag.ingest_url", async ({ params, respond }) => {
+    const tenantId = typeof params.tenantId === "string" ? params.tenantId : "";
+    const url = typeof params.url === "string" ? params.url : "";
+    if (!tenantId || !url.trim()) {
+      errorInvalid(respond, "tenantId (string) and url (string) required");
+      return;
+    }
+    try {
+      const res = await fetch(`${client.baseUrl}/tenants/${encodeURIComponent(tenantId)}/ingest-url`, {
+        method: "POST",
+        headers: { ...client.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await fetchJsonOrThrow(res);
+      respond(true, { tenantId, result: data }, undefined);
+    } catch (err) {
+      errorUnavailable(respond, String(err));
+    }
+  });
+
   api.registerGatewayMethod("rag.documents.delete", async ({ params, respond }) => {
     const tenantId = typeof params.tenantId === "string" ? params.tenantId : "";
     const docId = typeof params.docId === "string" ? params.docId : "";
